@@ -16,6 +16,8 @@ def senv(*k__v, **kwargs):
     sep = kwargs.get('sep', ' ')
     restore = {}
     for k, v in k__v:
+        if v is None:
+            continue
         prev = restore[k] = os.environ.get(k)
         os.environ[k] = (prev + sep if prev else '') + str(v)
     return dict((k, v) for k, v in restore.items() if v is not None)
@@ -114,8 +116,11 @@ def create_builder():
             cmake = find_cmake()
 
             try:
-                vars = {'ld': config['LDFLAGS'],
-                        'c': config['CFLAGS']}
+                vars = {}
+                _ld = config.get('LDFLAGS')
+                if _ld: vars['ld'] = _ld
+                _c = config.get('CFLAGS')
+                if _c: vars['C'] = _c
                 for key in list(vars):
                     vars[key] = vars[key].replace('-lSystem', '')
                     # Python on Maverics sets this, but not supported on clang
@@ -123,8 +128,8 @@ def create_builder():
                     vars[key] = vars[key].replace(
                         '-isysroot /Developer/SDKs/MacOSX10.6.sdk', '')
                 restore = senv(
-                    ('CFLAGS', vars['c']),
-                    ('LDFLAGS', vars['ld']),
+                    ('CFLAGS', vars.get('c')),
+                    ('LDFLAGS', vars.get('ld')),
                 )
 
                 try:
@@ -214,7 +219,7 @@ is_jython = sys.platform.startswith('java')
 is_pypy = hasattr(sys, 'pypy_version_info')
 is_win = platform.system() == 'Windows'
 is_linux = platform.system() == 'Linux'
-if is_jython or is_pypy or is_win:
+if is_jython or is_win:
     pass
 elif find_make():
     try:
@@ -273,7 +278,7 @@ setup(
     long_description=long_description,
     test_suite="tests",
     zip_safe=False,
-    packages=packages,
+    packages=find_packages(exclude=['ez_setup', 'tests', 'tests.*']),
     cmdclass=cmdclass,
     install_requires=[
         'amqp>=1.4.6',
