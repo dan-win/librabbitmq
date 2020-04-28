@@ -18,9 +18,24 @@ __docformat__ = 'restructuredtext'
 ConnectionError = _librabbitmq.ConnectionError
 ChannelError = _librabbitmq.ChannelError
 
+StateConflict = _librabbitmq.StateConflict
+CannotCreateSocket = _librabbitmq.CannotCreateSocket
+CannotOpenSocket = _librabbitmq.CannotOpenSocket
+ExchangeOrQueueNotFound = _librabbitmq.ExchangeOrQueueNotFound
+LoginError = _librabbitmq.LoginError
 
 __version__ = '2.0.0'
-__all__ = ['Connection', 'Message', 'ConnectionError', 'ChannelError']
+__all__ = [
+    'Connection', 
+    'Message', 
+    'ConnectionError', 
+    'ChannelError',
+    'StateConflict',
+    'CannotCreateSocket',
+    'CannotOpenSocket',
+    'ExchangeOrQueueNotFound',
+    'LoginError',
+    ]
 
 
 class Message(object):

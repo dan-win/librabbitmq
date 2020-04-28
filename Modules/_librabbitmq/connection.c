@@ -28,6 +28,12 @@ PyObject *PyRabbitMQExc_ConnectionError;
 PyObject *PyRabbitMQExc_ChannelError;
 PyObject *PyRabbitMQ_socket_timeout;
 
+PyObject *PyRabbitMQExc_StateConflict;
+PyObject *PyRabbitMQExc_CannotCreateSocket;
+PyObject *PyRabbitMQExc_CannotOpenSocket;
+PyObject *PyRabbitMQExc_ExchangeOrQueueNotFound;
+PyObject *PyRabbitMQExc_LoginError;
+
 
 _PYRMQ_INLINE amqp_table_entry_t*
 AMQTable_AddEntry(amqp_table_t*, amqp_bytes_t);
@@ -1140,15 +1146,20 @@ PyRabbitMQ_Connection_connect(PyRabbitMQ_Connection *self)
     Py_END_ALLOW_THREADS;
 
     if (!socket) {
-        PyErr_NoMemory();
+        // PyErr_NoMemory(); // <-- Are we sure that this caused by memory only?
+        PyErr_SetString(PyRabbitMQExc_CannotCreateSocket, "Cannot create socket");
         goto error;
     }
     Py_BEGIN_ALLOW_THREADS;
     status = amqp_socket_open(socket, self->hostname, self->port);
     Py_END_ALLOW_THREADS;
-    if (PyRabbitMQ_HandleAMQStatus(status, "Error opening socket")) {
+    if (status) {
+        PyErr_SetString(PyRabbitMQExc_CannotOpenSocket, "Cannot open socket");
         goto error;
     }
+    // if (PyRabbitMQ_HandleAMQStatus(status, "Error opening socket")) {
+    //     goto error;
+    // }
 
     Py_BEGIN_ALLOW_THREADS;
     self->sockfd = amqp_socket_get_sockfd(socket);
@@ -1170,8 +1181,12 @@ PyRabbitMQ_Connection_connect(PyRabbitMQ_Connection *self)
 
     Py_END_ALLOW_THREADS;
 
-    if (PyRabbitMQ_HandleAMQError(self, 0, reply, "Couldn't log in"))
-      goto bail;
+    // if (PyRabbitMQ_HandleAMQError(self, 0, reply, "Couldn't log in"))
+    //   goto bail;
+    if (reply.reply_type != AMQP_RESPONSE_NORMAL) {
+        PyErr_SetString(PyRabbitMQExc_LoginError, "Credentials error");
+        goto bail;
+    }
 
     /* after tune */
     self->connected = 1;
@@ -1179,13 +1194,17 @@ PyRabbitMQ_Connection_connect(PyRabbitMQ_Connection *self)
     self->frame_max = self->conn->frame_max;
     self->heartbeat = self->conn->heartbeat;
     self->server_properties = AMQTable_toPyDict(amqp_get_server_properties(self->conn));
+
+    PyObjectArray_XDECREF(&pyobj_array); // <--- Is this good point to do so? 
     Py_RETURN_NONE;
 error:
-    PyRabbitMQ_Connection_close(self);
+    // PyRabbitMQ_Connection_close(self); // <-- Avoid implicit behaviour inside c extension, delegate this to python-side wrapper. Do not forget that python class for connection uses context manager which calls .close() on __exit__. Indeed, on exception we call close twice (here and on python side).
+    ;
 bail:
     PyObjectArray_XDECREF(&pyobj_array);
 
-    return 0;
+    // return 0; // <- we jump here on exception, so we have to return NULL (lets keep syntax agreements for readablility:)
+    return NULL;
 }
 
 
@@ -2459,10 +2478,42 @@ PYRABBITMQ_MOD_INIT(_librabbitmq)
             "_librabbitmq.ConnectionError", NULL, NULL);
     PyModule_AddObject(module, "ConnectionError",
                        (PyObject *)PyRabbitMQExc_ConnectionError);
+
     PyRabbitMQExc_ChannelError = PyErr_NewException(
             "_librabbitmq.ChannelError", NULL, NULL);
     PyModule_AddObject(module, "ChannelError",
                        (PyObject *)PyRabbitMQExc_ChannelError);
+    
+    // Lets distinguish exceptions (cases) by class instead of string message inside:
+    PyRabbitMQExc_StateConflict = PyErr_NewException(
+            "_librabbitmq.StateConflict", NULL, NULL);
+    PyModule_AddObject(module, "StateConflict",
+                       (PyObject *)PyRabbitMQExc_StateConflict);
+
+
+    PyRabbitMQExc_CannotCreateSocket = PyErr_NewException(
+            "_librabbitmq.CannotCreateSocket", NULL, NULL);
+    PyModule_AddObject(module, "CannotCreateSocket",
+                       (PyObject *)PyRabbitMQExc_CannotCreateSocket);
+
+
+    PyRabbitMQExc_CannotOpenSocket = PyErr_NewException(
+            "_librabbitmq.CannotOpenSocket", NULL, NULL);
+    PyModule_AddObject(module, "CannotOpenSocket",
+                       (PyObject *)PyRabbitMQExc_CannotOpenSocket);
+
+
+    PyRabbitMQExc_ExchangeOrQueueNotFound = PyErr_NewException(
+            "_librabbitmq.ExchangeOrQueueNotFound", NULL, NULL);
+    PyModule_AddObject(module, "ExchangeOrQueueNotFound",
+                       (PyObject *)PyRabbitMQExc_ExchangeOrQueueNotFound);
+
+
+    PyRabbitMQExc_LoginError = PyErr_NewException(
+            "_librabbitmq.LoginError", NULL, NULL);
+    PyModule_AddObject(module, "LoginError",
+                       (PyObject *)PyRabbitMQExc_LoginError);
+
 #if PY_MAJOR_VERSION >= 3
     return module;
 #else

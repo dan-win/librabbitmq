@@ -55,3 +55,5 @@ tools/doc/man-date.ent
 
 clib/
 
+# pyenv settings
+.python-version
