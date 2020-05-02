@@ -6,14 +6,25 @@ from six.moves import xrange
 import socket
 import unittest
 
-from librabbitmq import Message, Connection, ConnectionError, ChannelError
-TEST_QUEUE = 'pyrabbit.testq'
+from librabbitmq import (
+    Message, 
+    Connection, 
+    ConnectionError, 
+    ChannelError,
 
+    StateConflict,
+    CannotCreateSocket,
+    CannotOpenSocket,
+    ExchangeOrQueueNotFound,
+    LoginError,
+    )
+TEST_QUEUE = 'pyrabbit.testq'
+RABBIT_MQ_PORT = 15672
 
 class test_Channel(unittest.TestCase):
 
     def setUp(self):
-        self.connection = Connection(host='localhost:5672', userid='guest',
+        self.connection = Connection(host='localhost:%s' % RABBIT_MQ_PORT, userid='guest',
                                      password='guest', virtual_host='/')
         self.channel = self.connection.channel()
         self.channel.queue_delete(TEST_QUEUE)
@@ -136,7 +147,7 @@ class test_Channel(unittest.TestCase):
 class test_Delete(unittest.TestCase):
 
     def setUp(self):
-        self.connection = Connection(host='localhost:5672', userid='guest',
+        self.connection = Connection(host='localhost:%s' % RABBIT_MQ_PORT, userid='guest',
                                      password='guest', virtual_host='/')
         self.channel = self.connection.channel()
         self.TEST_QUEUE = 'pyrabbitmq.testq2'
@@ -196,3 +207,92 @@ class test_Delete(unittest.TestCase):
                 self.connection.close()
             except ConnectionError:
                 pass
+
+class test_Exceptions(unittest.TestCase):
+
+    def test_exceptions_relationship(self):
+        self.assertTrue(issubclass(StateConflict, ConnectionError))
+        self.assertTrue(issubclass(CannotCreateSocket, ConnectionError))
+        self.assertTrue(issubclass(CannotOpenSocket, ConnectionError))
+        self.assertTrue(issubclass(LoginError, ConnectionError))
+
+        self.assertTrue(issubclass(ExchangeOrQueueNotFound, ChannelError))
+
+
+    def test_broker_is_down(self):
+        exc = None
+        connection = None
+        exc_raised = False
+        host = 'no-such-host:%s' % RABBIT_MQ_PORT
+        try:
+            connection = Connection(
+                host=host, 
+                userid='guest',
+                password='guest', 
+                virtual_host='/')
+        except CannotOpenSocket as e:
+            exc_raised = True
+        except Exception as e:
+            print("We should not be here!", e)
+            pass
+        finally:
+            if connection:
+                connection.close()
+
+        self.assertTrue(exc_raised, "Should assert CannotOpenSocket when broker not responds")
+
+
+    def test_login_error(self):
+        exc = None
+        connection = None
+        exc_raised = False
+        host = 'localhost:%s' % RABBIT_MQ_PORT
+        userid = 'no-such-user'
+        try:
+            connection = Connection(
+                host=host, 
+                userid=userid,
+                password='guest', 
+                virtual_host='/')
+        except LoginError as e:
+            exc_raised = True
+        except Exception as e:
+            print("We should not be here!", e)
+            pass
+        finally:
+            if connection is not None:
+                connection.close()
+
+        self.assertTrue(exc_raised, "Should raise LoginError when credentials are invalid")
+
+    def test_404_basic_get(self):
+        """Ability to detect 404 error when trying to use excange or declare which as not declared before
+        """
+        exc = None
+        connection = None
+        exc_raised = False
+        host = 'localhost:%s' % RABBIT_MQ_PORT
+        queue = 'no-such-queue'
+        try:
+            with Connection(
+                host=host, 
+                userid='guest',
+                password='guest', 
+                virtual_host='/') as connection:
+                with connection.channel() as channel:
+                    channel.basic_get(queue=queue)
+
+        except ExchangeOrQueueNotFound as e:
+            exc_raised = True
+        except Exception as e:
+            print("We should not be here!", e.__class__, e)
+            exc = e
+            pass
+        finally:
+            if connection is not None:
+                connection.close()
+
+        self.assertTrue(exc_raised, 
+            "Should assert ExchangeOrQueueNotFound instead of %s" % exc)
+
+

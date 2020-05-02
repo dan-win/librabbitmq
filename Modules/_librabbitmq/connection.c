@@ -28,11 +28,11 @@ PyObject *PyRabbitMQExc_ConnectionError;
 PyObject *PyRabbitMQExc_ChannelError;
 PyObject *PyRabbitMQ_socket_timeout;
 
-PyObject *PyRabbitMQExc_StateConflict;
-PyObject *PyRabbitMQExc_CannotCreateSocket;
-PyObject *PyRabbitMQExc_CannotOpenSocket;
-PyObject *PyRabbitMQExc_ExchangeOrQueueNotFound;
-PyObject *PyRabbitMQExc_LoginError;
+static PyObject *PyRabbitMQExc_StateConflict;
+static PyObject *PyRabbitMQExc_CannotCreateSocket;
+static PyObject *PyRabbitMQExc_CannotOpenSocket;
+static PyObject *PyRabbitMQExc_ExchangeOrQueueNotFound;
+static PyObject *PyRabbitMQExc_LoginError;
 
 
 _PYRMQ_INLINE amqp_table_entry_t*
@@ -130,7 +130,7 @@ _PYRMQ_INLINE int PyRabbitMQ_HandlePollError(int);
 int PyRabbitMQ_HandleAMQError(PyRabbitMQ_Connection *, unsigned int,
                               amqp_rpc_reply_t, const char *);
 void PyRabbitMQ_SetErr_UnexpectedHeader(amqp_frame_t*);
-int PyRabbitMQ_Not_Connected(PyRabbitMQ_Connection *);
+int PyRabbitMQ_HandleNotConnected(PyRabbitMQ_Connection *);
 
 static amqp_table_t PyDict_ToAMQTable(amqp_connection_state_t, PyObject *, amqp_pool_t *, pyobject_array_t *);
 static amqp_array_t PyIter_ToAMQArray(amqp_connection_state_t, PyObject *, amqp_pool_t *, pyobject_array_t *);
@@ -140,10 +140,10 @@ static PyObject* AMQArray_toPyList(amqp_array_t *array);
 
 int PyRabbitMQ_HandleAMQStatus(int, const char *);
 
-int PyRabbitMQ_Not_Connected(PyRabbitMQ_Connection *self)
+int PyRabbitMQ_HandleNotConnected(PyRabbitMQ_Connection *self) // <-- name changed because we implicitly raise exception here, this is not a boolean test like "is it connected?". 
 {
     if (!self->connected) {
-        PyErr_SetString(PyRabbitMQExc_ConnectionError,
+        PyErr_SetString(PyRabbitMQExc_StateConflict,
             "Operation on closed connection");
         return 1;
     }
@@ -871,7 +871,11 @@ int PyRabbitMQ_HandleError(int ret, char const *context)
         char errorstr[1024];
         snprintf(errorstr, sizeof(errorstr), "%s: %s",
                 context, strerror(-ret));
-        PyErr_SetString(PyRabbitMQExc_ConnectionError, errorstr);
+        if (ret == -404) {
+            PyErr_SetString(PyRabbitMQExc_ExchangeOrQueueNotFound, errorstr);
+        } else {
+            PyErr_SetString(PyRabbitMQExc_ConnectionError, errorstr);
+        }
         return 0;
     }
     return 1;
@@ -941,7 +945,13 @@ int PyRabbitMQ_HandleAMQError(PyRabbitMQ_Connection *self, unsigned int channel,
                         "%s: server channel error %d, message: %.*s",
                             context, m->reply_code,
                             (int) m->reply_text.len, (char *) m->reply_text.bytes);
-                    goto chanerror;
+                    switch (m->reply_code) {
+                        case (uint16_t)404:
+                            PyErr_SetString(PyRabbitMQExc_ExchangeOrQueueNotFound, "");
+                            goto channel_specific_error;                    
+                        default:
+                            goto chanerror;
+                    }
                 }
                 default:
                     snprintf(errorstr, sizeof(errorstr),
@@ -957,6 +967,10 @@ connerror:
     return PYRABBITMQ_CONNECTION_ERROR;
 chanerror:
     PyErr_SetString(PyRabbitMQExc_ChannelError, errorstr);
+    PyRabbitMQ_revive_channel(self, channel);
+    return PYRABBITMQ_CHANNEL_ERROR;
+channel_specific_error:
+    // Exception set already!
     PyRabbitMQ_revive_channel(self, channel);
     return PYRABBITMQ_CHANNEL_ERROR;
 }
@@ -1137,7 +1151,7 @@ PyRabbitMQ_Connection_connect(PyRabbitMQ_Connection *self)
     pyobject_array_t pyobj_array = {0};
 
     if (self->connected) {
-        PyErr_SetString(PyRabbitMQExc_ConnectionError, "Already connected");
+        PyErr_SetString(PyRabbitMQExc_StateConflict, "Already connected");
         goto bail;
     }
     Py_BEGIN_ALLOW_THREADS;
@@ -1198,12 +1212,12 @@ PyRabbitMQ_Connection_connect(PyRabbitMQ_Connection *self)
     PyObjectArray_XDECREF(&pyobj_array); // <--- Is this good point to do so? 
     Py_RETURN_NONE;
 error:
-    // PyRabbitMQ_Connection_close(self); // <-- Avoid implicit behaviour inside c extension, delegate this to python-side wrapper. Do not forget that python class for connection uses context manager which calls .close() on __exit__. Indeed, on exception we call close twice (here and on python side).
+    // PyRabbitMQ_Connection_close(self); // <-- Avoid implicit behaviour inside c extension, delegate this to python-side wrapper. Do not forget that python class for connection uses context manager which calls .close() on __exit__. Indeed, on exception we try to call close twice (here and on python side). Moreover, we decide to close current connection at row #1140
     ;
 bail:
     PyObjectArray_XDECREF(&pyobj_array);
 
-    // return 0; // <- we jump here on exception, so we have to return NULL (lets keep syntax agreements for readablility:)
+    // return 0; // <- we jump here on exception, so we have to return NULL (lets keep syntax agreements for readability:)
     return NULL;
 }
 
@@ -1251,7 +1265,7 @@ PyRabbitMQ_Connection_channel_open(PyRabbitMQ_Connection *self, PyObject *args)
 {
     unsigned int channel;
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "I", &channel))
@@ -1289,7 +1303,7 @@ PyRabbitMQ_Connection_channel_close(PyRabbitMQ_Connection *self,
 {
     unsigned int channel = 0;
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto error;
 
     if (!PyArg_ParseTuple(args, "I", &channel))
@@ -1575,7 +1589,7 @@ PyRabbitMQ_Connection_queue_bind(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "IOOOO",
@@ -1635,7 +1649,7 @@ PyRabbitMQ_Connection_queue_unbind(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "IOOOO",
@@ -1692,7 +1706,7 @@ PyRabbitMQ_Connection_queue_delete(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "IOII",
@@ -1745,7 +1759,7 @@ PyRabbitMQ_Connection_queue_declare(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self)) 
         goto bail;
 
     if (!PyArg_ParseTuple(args, "IOIIIIO",
@@ -1806,7 +1820,7 @@ PyRabbitMQ_Connection_queue_purge(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "IOI", &channel, &queue, &no_wait))
@@ -1854,7 +1868,7 @@ PyRabbitMQ_Connection_exchange_declare(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "IOOIIIO",
@@ -1910,7 +1924,7 @@ PyRabbitMQ_Connection_exchange_delete(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "IOI", &channel, &exchange, &if_unused))
@@ -1961,7 +1975,7 @@ PyRabbitMQ_Connection_basic_publish(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "Is#OOO|II",
@@ -2021,7 +2035,7 @@ PyRabbitMQ_Connection_basic_ack(PyRabbitMQ_Connection *self,
     unsigned int multiple = 0;
     int ret = 0;
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "InI", &channel, &delivery_tag, &multiple))
@@ -2055,7 +2069,7 @@ static PyObject *PyRabbitMQ_Connection_basic_reject(PyRabbitMQ_Connection *self,
 
     int ret = 0;
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "InI", &channel, &delivery_tag, &multiple))
@@ -2093,7 +2107,7 @@ PyRabbitMQ_Connection_basic_cancel(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (!self->connected)
         goto ok;
 
     if (!PyArg_ParseTuple(args, "IO", &channel, &consumer_tag))
@@ -2142,7 +2156,7 @@ PyRabbitMQ_Connection_basic_consume(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "IOOIIIO",
@@ -2196,7 +2210,7 @@ PyRabbitMQ_Connection_basic_qos(PyRabbitMQ_Connection *self,
     unsigned int prefetch_count = 0;
     unsigned int _global = 0;
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto error;
 
     if (!PyArg_ParseTuple(args, "InII",
@@ -2228,7 +2242,7 @@ PyRabbitMQ_Connection_flow(PyRabbitMQ_Connection *self,
     amqp_channel_flow_ok_t *ok;
     amqp_rpc_reply_t reply;
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "II", &channel, &active))
@@ -2261,7 +2275,7 @@ PyRabbitMQ_Connection_basic_recover(PyRabbitMQ_Connection *self,
     amqp_basic_recover_ok_t *ok;
     amqp_rpc_reply_t reply;
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "II", &channel, &requeue))
@@ -2292,11 +2306,11 @@ PyRabbitMQ_Connection_basic_recv(PyRabbitMQ_Connection *self,
     int ready = 0;
     double timeout;
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "d", &timeout))
-        goto bail;
+        goto bail; // <-- here is exception indeed. But we ignore it and return "NULL". TO-DO.
 
     if (PYRMQ_SHOULD_POLL(timeout) && !AMQP_ACTIVE_BUFFERS(self->conn)) {
         Py_BEGIN_ALLOW_THREADS;
@@ -2348,7 +2362,7 @@ PyRabbitMQ_Connection_basic_get(PyRabbitMQ_Connection *self,
 
     pyobject_array_t pyobj_array = {0};
 
-    if (PyRabbitMQ_Not_Connected(self))
+    if (PyRabbitMQ_HandleNotConnected(self))
         goto bail;
 
     if (!PyArg_ParseTuple(args, "IOI", &channel, &queue, &no_ack))
@@ -2476,41 +2490,53 @@ PYRABBITMQ_MOD_INIT(_librabbitmq)
 
     PyRabbitMQExc_ConnectionError = PyErr_NewException(
             "_librabbitmq.ConnectionError", NULL, NULL);
+    Py_XINCREF(PyRabbitMQExc_ConnectionError);
     PyModule_AddObject(module, "ConnectionError",
                        (PyObject *)PyRabbitMQExc_ConnectionError);
 
     PyRabbitMQExc_ChannelError = PyErr_NewException(
             "_librabbitmq.ChannelError", NULL, NULL);
+    Py_XINCREF(PyRabbitMQExc_ChannelError);
     PyModule_AddObject(module, "ChannelError",
                        (PyObject *)PyRabbitMQExc_ChannelError);
     
     // Lets distinguish exceptions (cases) by class instead of string message inside:
-    PyRabbitMQExc_StateConflict = PyErr_NewException(
-            "_librabbitmq.StateConflict", NULL, NULL);
+    PyRabbitMQExc_StateConflict = PyErr_NewExceptionWithDoc(
+            "Invalid operation on closed connection/channel. Subclass of ConnectionError",
+            "_librabbitmq.StateConflict", PyRabbitMQExc_ConnectionError, NULL);
+    Py_XINCREF(PyRabbitMQExc_StateConflict);
     PyModule_AddObject(module, "StateConflict",
                        (PyObject *)PyRabbitMQExc_StateConflict);
 
 
-    PyRabbitMQExc_CannotCreateSocket = PyErr_NewException(
-            "_librabbitmq.CannotCreateSocket", NULL, NULL);
+    PyRabbitMQExc_CannotCreateSocket = PyErr_NewExceptionWithDoc(
+            "Cannot create socket, can occurs on low memory. Subclass of ConnectionError",
+            "_librabbitmq.CannotCreateSocket", PyRabbitMQExc_ConnectionError, NULL);
+    Py_XINCREF(PyRabbitMQExc_CannotCreateSocket);
     PyModule_AddObject(module, "CannotCreateSocket",
                        (PyObject *)PyRabbitMQExc_CannotCreateSocket);
 
 
-    PyRabbitMQExc_CannotOpenSocket = PyErr_NewException(
-            "_librabbitmq.CannotOpenSocket", NULL, NULL);
+    PyRabbitMQExc_CannotOpenSocket = PyErr_NewExceptionWithDoc(
+            "Cannot connect to RabbitMQ broker. Subclass of ConnectionError",
+            "_librabbitmq.CannotOpenSocket", PyRabbitMQExc_ConnectionError, NULL);
+    Py_XINCREF(PyRabbitMQExc_CannotOpenSocket);
     PyModule_AddObject(module, "CannotOpenSocket",
                        (PyObject *)PyRabbitMQExc_CannotOpenSocket);
 
 
-    PyRabbitMQExc_ExchangeOrQueueNotFound = PyErr_NewException(
-            "_librabbitmq.ExchangeOrQueueNotFound", NULL, NULL);
+    PyRabbitMQExc_ExchangeOrQueueNotFound = PyErr_NewExceptionWithDoc(
+            "Invalid operation on resource which not exists. Subclass of ConnectionError",
+            "_librabbitmq.ExchangeOrQueueNotFound", PyRabbitMQExc_ChannelError, NULL);
+    Py_XINCREF(PyRabbitMQExc_ExchangeOrQueueNotFound);
     PyModule_AddObject(module, "ExchangeOrQueueNotFound",
                        (PyObject *)PyRabbitMQExc_ExchangeOrQueueNotFound);
 
 
-    PyRabbitMQExc_LoginError = PyErr_NewException(
-            "_librabbitmq.LoginError", NULL, NULL);
+    PyRabbitMQExc_LoginError = PyErr_NewExceptionWithDoc(
+            "Error on login. Subclass of ConnectionError",
+            "_librabbitmq.LoginError", PyRabbitMQExc_ConnectionError, NULL);
+    Py_XINCREF(PyRabbitMQExc_LoginError);
     PyModule_AddObject(module, "LoginError",
                        (PyObject *)PyRabbitMQExc_LoginError);
 
