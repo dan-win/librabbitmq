@@ -871,11 +871,7 @@ int PyRabbitMQ_HandleError(int ret, char const *context)
         char errorstr[1024];
         snprintf(errorstr, sizeof(errorstr), "%s: %s",
                 context, strerror(-ret));
-        if (ret == -404) {
-            PyErr_SetString(PyRabbitMQExc_ExchangeOrQueueNotFound, errorstr);
-        } else {
-            PyErr_SetString(PyRabbitMQExc_ConnectionError, errorstr);
-        }
+        PyErr_SetString(PyRabbitMQExc_ConnectionError, errorstr);
         return 0;
     }
     return 1;
