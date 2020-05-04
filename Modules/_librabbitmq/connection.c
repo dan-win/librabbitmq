@@ -1290,7 +1290,11 @@ PyRabbitMQ_Connection_destroy_channel(PyRabbitMQ_Connection *self,
     amqp_maybe_release_buffers_on_channel(self->conn, channel);
     Py_END_ALLOW_THREADS;
 
-    return PyRabbitMQ_HandleAMQError(self, channel, reply, "Couldn't close channel");
+    // return PyRabbitMQ_HandleAMQError(self, channel, reply, "Couldn't close channel"); // < --- Do we need to shadow real exception upon exit from context manager?
+    switch (reply.reply_type) {
+        case AMQP_RESPONSE_NORMAL: 0;
+        default: 1;
+    };
 }
 
 static PyObject*
@@ -1299,19 +1303,13 @@ PyRabbitMQ_Connection_channel_close(PyRabbitMQ_Connection *self,
 {
     unsigned int channel = 0;
 
-    if (PyRabbitMQ_HandleNotConnected(self))
-        goto error;
+    if (self->connected) { // 
+        if (!PyArg_ParseTuple(args, "I", &channel))
+            return NULL;
 
-    if (!PyArg_ParseTuple(args, "I", &channel))
-        goto error;
-
-    if (PyRabbitMQ_Connection_destroy_channel(self, channel))
-        goto error;
-
+        PyRabbitMQ_Connection_destroy_channel(self, channel); // <-- Usually we close channel upon exit or after exception inside the scope of context manager, so we do not have to re-raise new exception here
+    }
     Py_RETURN_NONE;
-
-error:
-    return 0;
 }
 
 _PYRMQ_INLINE int

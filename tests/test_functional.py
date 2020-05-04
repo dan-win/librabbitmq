@@ -19,7 +19,7 @@ from librabbitmq import (
     LoginError,
     )
 TEST_QUEUE = 'pyrabbit.testq'
-RABBIT_MQ_PORT = 5672
+RABBIT_MQ_PORT = 15672
 
 class test_Channel(unittest.TestCase):
 
